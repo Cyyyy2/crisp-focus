@@ -4,208 +4,6 @@
    ========================================================================== */
 
 var obsidian = require("obsidian");
-const { requestUrl } = obsidian;
-
-const CRISP_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAiz41HIDpD59SH3DjKnovUO+EEhTJXjvmiug/ev9t4ZQ=
------END PUBLIC KEY-----`;
-
-const CRISP_LICENSE_PRODUCTS = [
-  "Crisp Suite",
-  "Crisp Organize",
-  "Crisp ASR",
-  "Crisp Annotations",
-  "Crisp File Explorer",
-  "Crisp Focus",
-  "Crisp Reading Rail",
-  "Crisp Base",
-];
-
-
-function base64UrlToUint8Array(base64url) {
-  const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = base64.length % 4;
-  const padded = pad ? base64 + "=".repeat(4 - pad) : base64;
-  const raw = atob(padded);
-  const buffer = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) {
-    buffer[i] = raw.charCodeAt(i);
-  }
-  return buffer;
-}
-
-function getCryptoSubtle(windowObj = window) {
-  return windowObj && windowObj.crypto && windowObj.crypto.subtle
-    ? windowObj.crypto.subtle
-    : null;
-}
-
-async function importEd25519PublicKey(pem, windowObj = window) {
-  const subtle = getCryptoSubtle(windowObj);
-  if (!subtle) {
-    throw new Error("当前 Obsidian 版本不支持 WebCrypto Ed25519");
-  }
-  const pemContents = pem
-    .replace("-----BEGIN PUBLIC KEY-----", "")
-    .replace("-----END PUBLIC KEY-----", "")
-    .replace(/\s/g, "");
-  const der = base64UrlToUint8Array(pemContents);
-  return await subtle.importKey(
-    "spki",
-    der.buffer,
-    { name: "Ed25519" },
-    true,
-    ["verify"]
-  );
-}
-
-async function verifyLicenseCode(licenseCode, targetPluginId = "crisp-focus", app = null, windowObj = window, options = {}) {
-  const trimmed = (licenseCode || "").trim();
-  if (!trimmed) return { valid: false, reason: "授权码为空" };
-  const parts = trimmed.split(".");
-  if (parts.length !== 2) return { valid: false, reason: "授权码格式无效" };
-  const [payloadBase64, signatureBase64] = parts;
-  try {
-    const payloadJson = new TextDecoder().decode(base64UrlToUint8Array(payloadBase64));
-    const payload = JSON.parse(payloadJson);
-    if (!payload || typeof payload !== "object") {
-      return { valid: false, reason: "授权数据无效" };
-    }
-    if (!CRISP_LICENSE_PRODUCTS.includes(payload.product)) return { valid: false, reason: "授权码不属于 Crisp 系列插件" };
-    const features = Array.isArray(payload.features) ? payload.features : [];
-    if (!features.includes("all") && !features.includes(targetPluginId)) {
-      return { valid: false, reason: `该授权码未包含 ${targetPluginId} 权限` };
-    }
-    if (payload.expiresAt) {
-      const expiresAt = new Date(payload.expiresAt).getTime();
-      if (!Number.isFinite(expiresAt)) {
-        return { valid: false, reason: "授权到期时间无效" };
-      }
-      if (expiresAt < Date.now()) {
-        return { valid: false, reason: `授权已于 ${String(payload.expiresAt).split("T")[0]} 到期` };
-      }
-    }
-    const publicKey = await importEd25519PublicKey(CRISP_PUBLIC_KEY_PEM, windowObj);
-    const isValid = await getCryptoSubtle(windowObj).verify(
-      "Ed25519",
-      publicKey,
-      base64UrlToUint8Array(signatureBase64),
-      new TextEncoder().encode(payloadBase64)
-    );
-    if (!isValid) return { valid: false, reason: "授权签名无效" };
-    if (options.skipOnline) return { valid: true, payload, source: "offline" };
-
-    try {
-      const deviceId = app?.appId || (app?.vault?.getName ? "vault-" + encodeURIComponent(app.vault.getName()) : "device-default");
-      const res = await Promise.race([
-        requestUrl({
-          url: "https://license.letschips.xyz/api/verify-device",
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            licenseCode: trimmed,
-            deviceId: deviceId,
-            action: "activate",
-            pluginId: targetPluginId
-          }),
-          throw: false
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Crisp license check timeout")), 2500))
-      ]);
-
-      let cloudResult = null;
-      try {
-        cloudResult = res.json;
-      } catch {
-        cloudResult = null;
-      }
-
-      // 1. 明确的服务端业务拒绝（200/400/401/403 且带有明确的 valid: false）
-      const isAuthDenial =
-        (res.status === 200 || res.status === 400 || res.status === 401 || res.status === 403) &&
-        cloudResult !== null &&
-        cloudResult.valid === false;
-
-      if (isAuthDenial) {
-        return {
-          valid: false,
-          reason: cloudResult?.reason || "授权已被服务端拒绝或设备数已达上限"
-        };
-      }
-
-      // 2. 服务端明确批准（200 OK 且 valid: true）
-      if (res.status === 200 && cloudResult && cloudResult.valid === true) {
-        return { valid: true, payload, message: cloudResult.message, source: "online" };
-      }
-
-      // 其余情况（404/408/429/5xx、网关故障等）均视为服务不可用，降级离线可用
-      if (res.status >= 400) {
-        console.warn(`[Crisp Focus] License server unavailable (status ${res.status}), offline fallback`);
-      }
-    } catch (netErr) {
-      return { valid: true, payload, message: "离线验证成功", source: "offline" };
-    }
-
-    return { valid: true, payload, message: "离线验证成功", source: "offline" };
-  } catch (e) {
-    return { valid: false, reason: `解析授权码失败: ${e.message}` };
-  }
-}
-
-class CrispFocusLicenseManager {
-  constructor(app, settings, options = {}) {
-    this.app = app;
-    this.settings = settings;
-    this.verifier = options.verifier || verifyLicenseCode;
-    this.now = options.now || (() => Date.now());
-    this.onEntitlementLost = options.onEntitlementLost || (() => {});
-    this.windowObj = options.windowObj || window;
-    this.status = { valid: false, reason: "尚未验证" };
-
-    this.verificationId = 0;
-    this.backgroundVerification = null;
-  }
-
-  isEntitled() {
-    return this.status.valid === true;
-  }
-
-  getStatus() {
-    return this.status;
-  }
-
-  async initialize() {
-    const id = ++this.verificationId;
-    const result = await this.verifier(this.settings.licenseCode, "crisp-focus", this.app, this.windowObj, { skipOnline: true });
-    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
-    this.status = result;
-    if (result.valid) this.backgroundVerification = this.verify();
-    return result;
-  }
-
-  async verify(code = this.settings.licenseCode) {
-    const id = ++this.verificationId;
-    const wasEntitled = this.isEntitled();
-    let result;
-    try {
-      result = await this.verifier(code, "crisp-focus", this.app, this.windowObj);
-    } catch (error) {
-      result = { valid: false, reason: `授权验证失败: ${error.message || error}` };
-    }
-
-    if (id !== this.verificationId) return { valid: false, reason: "授权校验已被更新" };
-
-    if (result.valid && result.source === "online") {
-      this.settings.licenseLastOnlineAt = this.now();
-    }
-
-    this.status = result;
-    if (wasEntitled && !this.isEntitled()) {
-      this.onEntitlementLost(result);
-    }
-    return result;
-  }
-}
 
 // Inline monkey-around helper
 function around(target, patches) {
@@ -1425,10 +1223,6 @@ const FOCUS_SCENES = Object.freeze({
   }),
 });
 
-function sceneRequiresLicense(scene) {
-  return scene.settings.typewriterAudioEnabled || scene.settings.ambientSound !== "off";
-}
-
 class FocusSessionController {
   constructor(options = {}) {
     this.now = options.now || (() => Date.now());
@@ -1578,8 +1372,6 @@ const DEFAULT_SETTINGS = {
   typewriterBellEnabled: true,
   ambientSound: "off", // off, rain, campfire, ocean, wind
   ambientVolume: 0.65,
-  licenseCode: "",
-  licenseLastOnlineAt: 0,
   sessionDurationMinutes: 25,
   sessionState: { status: "idle", endAt: 0, remainingMs: 0 }
 };
@@ -1617,7 +1409,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
-    this.licenseDraft = plugin.settings?.licenseCode || "";
   }
 
   display() {
@@ -1692,7 +1483,7 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(sceneGroup)
       .setName("当前场景")
-      .setDesc("静默写作免费可用；包含音效的场景需要激活。")
+      .setDesc("一键应用光标、定焦、打字反馈与环境音组合。")
       .addDropdown((dropdown) => {
         dropdown.addOption("custom", "自定义（当前设置）");
         Object.entries(FOCUS_SCENES).forEach(([sceneId, scene]) => {
@@ -1761,55 +1552,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         .onClick(async () => {
           await this.plugin.stopFocusSession();
           this.display();
-        }));
-
-    const licenseGroup = createGroup(
-      "软件授权",
-      "本地 Ed25519 签名验证与在线设备校验，支持离线使用",
-      true
-    );
-
-    const statusSetting = new obsidian.Setting(licenseGroup)
-      .setName("当前激活状态")
-      .setDesc("正在验证授权状态...");
-
-    const licenseStatus = this.plugin.licenseManager.getStatus();
-    if (licenseStatus.valid && licenseStatus.payload) {
-      const owner = licenseStatus.payload.userName || "Crisp 用户";
-      const expiry = licenseStatus.payload.expiresAt
-        ? `，到期时间: ${String(licenseStatus.payload.expiresAt).split("T")[0]}`
-        : "";
-      const verification = licenseStatus.source === "offline" ? "离线验证" : "在线验证";
-      statusSetting.setDesc(`✅ 已激活（${verification}，授权给: ${owner}${expiry}）`);
-    } else if (this.plugin.settings.licenseCode) {
-      statusSetting.setDesc(`❌ 未激活（${licenseStatus.reason || "授权码无效"}）`);
-    } else {
-      statusSetting.setDesc("❌ 未激活（可免费使用动效光标，激活后解锁打字音效与 HD 环境音）");
-    }
-
-    new obsidian.Setting(licenseGroup)
-      .setName("输入授权码")
-      .setDesc("授权码会先在本地验签，再发送授权码、设备标识与插件 ID 完成在线设备校验。")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text
-          .setPlaceholder("粘贴 Crisp 授权码...")
-          .setValue(this.licenseDraft || this.plugin.settings.licenseCode)
-          .onChange((value) => {
-            this.licenseDraft = value;
-          });
-      })
-      .addButton((button) => button
-        .setButtonText("激活 / 重新验证")
-        .setCta()
-        .onClick(async () => {
-          const result = await this.plugin.activateLicense(this.licenseDraft);
-          if (result.valid && result.payload) {
-            new obsidian.Notice(`🎉 Crisp Focus 激活成功！欢迎使用，${result.payload.userName || "Crisp 用户"}`);
-            this.display();
-          } else {
-            new obsidian.Notice(`❌ 激活失败: ${result.reason}`);
-          }
         }));
 
     // Card 1: Smooth Animated Cursor
@@ -2023,13 +1765,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
         toggle
           .setValue(this.plugin.settings.typewriterAudioEnabled)
           .onChange(async (val) => {
-            if (val && !this.plugin.licenseManager.isEntitled()) {
-              new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
-              this.plugin.settings.typewriterAudioEnabled = false;
-              await this.plugin.saveSettings();
-              this.display();
-              return;
-            }
             this.plugin.markSceneCustom();
             this.plugin.settings.typewriterAudioEnabled = val;
             await this.plugin.saveSettings();
@@ -2048,11 +1783,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .addOption("woodenFish", "🪵 Zen Wooden Fish (功德木鱼与磬)")
           .setValue(this.plugin.settings.soundTheme || "typewriter")
           .onChange(async (val) => {
-            if (!this.plugin.licenseManager.isEntitled()) {
-              new obsidian.Notice("🔒 切换音效主题属于 Crisp 激活用户专属功能");
-              this.display();
-              return;
-            }
             this.plugin.markSceneCustom();
             this.plugin.settings.soundTheme = val;
             await this.plugin.saveSettings();
@@ -2107,13 +1837,6 @@ class CrispFocusSettingTab extends obsidian.PluginSettingTab {
           .addOption("wind", "❄️ Arctic Cold Wind (极地寒风呼啸)")
           .setValue(this.plugin.settings.ambientSound || "off")
           .onChange(async (val) => {
-            if (val !== "off" && !this.plugin.licenseManager.isEntitled()) {
-              new obsidian.Notice("🔒 播放 HD 环境音属于 Crisp 激活用户专属功能");
-              this.plugin.settings.ambientSound = "off";
-              await this.plugin.saveSettings();
-              this.display();
-              return;
-            }
             this.plugin.markSceneCustom();
             this.plugin.settings.ambientSound = val;
             await this.plugin.saveSettings();
@@ -2160,27 +1883,14 @@ class CrispFocusPlugin extends obsidian.Plugin {
 
     const winObj = this.app.workspace.containerEl.ownerDocument.defaultView || window;
     this.mainWindow = winObj;
-    this.licenseManager = new CrispFocusLicenseManager(this.app, this.settings, {
-      verifier: this.licenseVerifier || verifyLicenseCode,
-      windowObj: winObj,
-      onEntitlementLost: () => {
-        if (this.audio) this.audio.stopAmbient();
-      },
-    });
-    if (this.licenseVerifier) {
-      await this.refreshLicense();
-    } else {
-      await this.licenseManager.initialize();
-    }
     this.audio = new CrispFocusAudioEngine(
       this.app,
       () => this.settings.focusModeEnabled
-        && this.settings.typewriterAudioEnabled
-        && this.licenseManager.isEntitled(),
+        && this.settings.typewriterAudioEnabled,
       () => this.settings.soundTheme || "typewriter",
       () => this.settings.typewriterVolume,
       () => this.settings.typewriterBellEnabled,
-      () => this.settings.focusModeEnabled && this.licenseManager.isEntitled()
+      () => this.settings.focusModeEnabled
         ? (this.settings.ambientSound || "off")
         : "off",
       () => this.settings.ambientVolume ?? 0.65,
@@ -2292,10 +2002,6 @@ class CrispFocusPlugin extends obsidian.Plugin {
       id: "toggle-typewriter-audio",
       name: "Toggle sound effects",
       callback: async () => {
-        if (!this.settings.typewriterAudioEnabled && !this.licenseManager.isEntitled()) {
-          new obsidian.Notice("🔒 开启打字音效属于 Crisp 激活用户专属功能");
-          return;
-        }
         this.markSceneCustom();
         this.settings.typewriterAudioEnabled = !this.settings.typewriterAudioEnabled;
         await this.saveSettings();
@@ -2375,40 +2081,10 @@ class CrispFocusPlugin extends obsidian.Plugin {
     await this.saveData(this.settings);
   }
 
-  async refreshLicense() {
-    const previousLastOnlineAt = this.settings.licenseLastOnlineAt;
-    const result = await this.licenseManager.verify();
-    if (this.settings.licenseLastOnlineAt !== previousLastOnlineAt) {
-      await this.saveSettings();
-    }
-    if (!result.valid && this.audio) {
-      this.audio.stopAmbient();
-    }
-    return result;
-  }
-
-  async activateLicense(code) {
-    const trimmed = (code || "").trim();
-    const savedCode = this.settings.licenseCode;
-    const result = await this.licenseManager.verify(trimmed);
-    if (result.valid) {
-      this.settings.licenseCode = trimmed;
-      await this.saveSettings();
-      return result;
-    }
-    if (savedCode && savedCode !== trimmed) {
-      await this.licenseManager.verify(savedCode);
-    }
-    return result;
-  }
-
   async applyScene(sceneId) {
     const scene = FOCUS_SCENES[sceneId];
     if (!scene) {
       return { applied: false, reason: "未知的专注场景" };
-    }
-    if (sceneRequiresLicense(scene) && !this.licenseManager.isEntitled()) {
-      return { applied: false, reason: "此场景包含音效，需要先激活 Crisp Focus" };
     }
 
     Object.assign(this.settings, scene.settings, { activeSceneId: sceneId });

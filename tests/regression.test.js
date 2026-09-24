@@ -270,7 +270,6 @@ function loadPluginInternals(options = {}) {
   const source = `${fs.readFileSync(pluginPath, "utf8")}
 module.exports.__test = {
   CrispFocusAudioEngine,
-  CrispFocusLicenseManager: typeof CrispFocusLicenseManager === "function" ? CrispFocusLicenseManager : undefined,
   CrispFocusPlugin,
   CrispTypewriterEngine: typeof CrispTypewriterEngine === "function" ? CrispTypewriterEngine : undefined,
   createTypewriterExtension: typeof createTypewriterExtension === "function" ? createTypewriterExtension : undefined,
@@ -279,7 +278,6 @@ module.exports.__test = {
   ensureCursorLayerPatched,
   patchCursorLayer,
   renderAboutCard: typeof renderAboutCard === "function" ? renderAboutCard : undefined,
-  CRISP_LICENSE_PRODUCTS,
 };`;
   const timers = [];
   const audioElements = [];
@@ -390,93 +388,11 @@ test("settings About card exposes the plugin purpose and author", () => {
 }
 );
 
-test("license compatibility includes the complete current Crisp family", () => {
-  const { CRISP_LICENSE_PRODUCTS } = loadPluginInternals();
-  assert.deepEqual(Array.from(CRISP_LICENSE_PRODUCTS), [
-    "Crisp Suite",
-    "Crisp Organize",
-    "Crisp ASR",
-    "Crisp Annotations",
-    "Crisp File Explorer",
-    "Crisp Focus",
-    "Crisp Reading Rail",
-    "Crisp Base",
-  ]);
-});
-
-test("paid audio remains unavailable until the current license is verified", async () => {
-  const { CrispFocusPlugin } = loadPluginInternals();
-  const { windowObject } = createWindow();
-  const plugin = new CrispFocusPlugin();
-  plugin.app = createPluginApp(windowObject);
-  plugin.loadData = async () => ({
-    licenseCode: "",
-    typewriterAudioEnabled: true,
-  });
-  plugin.saveData = async () => {};
-
-  await plugin.onload();
-
-  assert.equal(plugin.audio.getEnabled(), false);
-  assert.equal(plugin.audio.getAmbientSound(), "off");
-  plugin.onunload();
-});
-
-test("license manager accepts online verification and rejects a later revocation", async () => {
-  const { CrispFocusLicenseManager } = loadPluginInternals();
-  assert.equal(typeof CrispFocusLicenseManager, "function");
-  const settings = { licenseCode: "signed-code", licenseLastOnlineAt: 0 };
-  let result = {
-    valid: true,
-    source: "online",
-    payload: { product: "Crisp Suite", features: ["all"] },
-  };
-  let losses = 0;
-  const manager = new CrispFocusLicenseManager(null, settings, {
-    now: () => 1_000,
-    onEntitlementLost: () => {
-      losses += 1;
-    },
-    verifier: async () => result,
-  });
-
-  assert.equal((await manager.verify()).valid, true);
-  assert.equal(manager.isEntitled(), true);
-  assert.equal(settings.licenseLastOnlineAt, 1_000);
-
-  result = { valid: false, reason: "授权已撤销", source: "online" };
-  assert.equal((await manager.verify()).valid, false);
-  assert.equal(manager.isEntitled(), false);
-  assert.equal(losses, 1);
-});
-
-test("offline license fallback succeeds on valid cryptographic signature", async () => {
-  const { CrispFocusLicenseManager } = loadPluginInternals();
-  assert.equal(typeof CrispFocusLicenseManager, "function");
-  const now = 10 * 24 * 60 * 60 * 1000;
-  const verifier = async () => ({
-    valid: true,
-    source: "offline",
-    payload: { product: "Crisp Suite", features: ["all"] },
-    message: "离线验证成功",
-  });
-  const manager = new CrispFocusLicenseManager(null, {
-    licenseCode: "signed-code",
-    licenseLastOnlineAt: 0,
-  }, { now: () => now, verifier });
-
-  const result = await manager.verify();
-  assert.equal(result.valid, true);
-  assert.equal(result.source, "offline");
-  assert.equal(manager.isEntitled(), true);
-});
-
 test("applying a licensed focus scene updates its complete preset atomically", async () => {
   const { CrispFocusPlugin, FOCUS_SCENES } = loadPluginInternals();
   assert.equal(typeof FOCUS_SCENES, "object");
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({});
   plugin.saveData = async () => {};
@@ -511,29 +427,6 @@ test("applying a licensed focus scene updates its complete preset atomically", a
       typewriterVolume: 0.35,
     }
   );
-  plugin.onunload();
-});
-
-test("an unlicensed paid scene is rejected without changing the current setup", async () => {
-  const { CrispFocusPlugin } = loadPluginInternals();
-  const { windowObject } = createWindow();
-  const plugin = new CrispFocusPlugin();
-  plugin.app = createPluginApp(windowObject);
-  plugin.loadData = async () => ({
-    activeSceneId: "silent-writing",
-    ambientSound: "off",
-    cursorSpeed: 80,
-    typewriterAudioEnabled: false,
-  });
-  plugin.saveData = async () => {};
-  await plugin.onload();
-  const before = JSON.stringify(plugin.settings);
-
-  const result = await plugin.applyScene("vintage-typewriter");
-
-  assert.equal(result.applied, false);
-  assert.match(result.reason, /激活/);
-  assert.equal(JSON.stringify(plugin.settings), before);
   plugin.onunload();
 });
 
@@ -736,18 +629,6 @@ function createPluginApp(windowObject) {
       },
     },
   };
-}
-
-function grantTestLicense(plugin) {
-  plugin.licenseVerifier = async () => ({
-    valid: true,
-    source: "online",
-    payload: {
-      product: "Crisp Suite",
-      features: ["all"],
-      userName: "Test user",
-    },
-  });
 }
 
 test("default typewriter Backspace sound completes without throwing", () => {
@@ -986,7 +867,6 @@ test("one typing keydown starts ambient audio at most once", async () => {
   const { CrispFocusPlugin, audioElements } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     ambientSound: "rain",
@@ -1011,7 +891,6 @@ test("repeated typing reuses an already-playing ambient track", async () => {
   const { CrispFocusPlugin, audioElements } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     ambientSound: "rain",
@@ -1151,7 +1030,6 @@ test("Focus mode disables all effects without erasing feature choices", async ()
   windowObject.addCursorFixture(editor, cursor);
 
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     ambientSound: "rain",
@@ -1502,7 +1380,6 @@ test("Typewriter styles and toggle commands update editor classes and CSS variab
   windowObject.addCursorFixture(editor, cursor);
 
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     focusModeEnabled: true,
@@ -1590,7 +1467,6 @@ test("inline input hosts outside the Markdown editor receive key sounds", async 
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     focusModeEnabled: true,
@@ -1633,7 +1509,6 @@ test("key sounds stay silent when focus is not in a text input", async () => {
   const { CrispFocusPlugin } = loadPluginInternals();
   const { windowObject } = createWindow();
   const plugin = new CrispFocusPlugin();
-  grantTestLicense(plugin);
   plugin.app = createPluginApp(windowObject);
   plugin.loadData = async () => ({
     focusModeEnabled: true,

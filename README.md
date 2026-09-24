@@ -14,15 +14,13 @@ ambient soundscapes to Obsidian.
 - Five synthesized typing themes with a shared output limiter.
 - Four bundled local ambient soundscapes with normalized loudness.
 - IME-aware typing feedback and pop-out window support.
-- Local Ed25519 signature validation with online device verification.
 - No analytics or telemetry.
 
 ## Focus scenes
 
 Choose a scene from the settings page or the command palette. A scene applies
 its cursor, typewriter scrolling, typing feedback, and ambient sound choices as one atomic preset.
-`Silent writing` is available without activation. Scenes that contain paid
-audio stay locked until the current license is verified. Changing an
+Every scene is available immediately, with no activation required. Changing an
 individual scene-controlled setting marks the setup as `Custom`.
 
 ## Focus sessions
@@ -33,16 +31,10 @@ the remaining time and toggles pause/resume. Session state is stored in the
 current vault so an unfinished countdown survives plugin reloads. Completing
 or stopping a session turns Focus mode off and stops ambient audio.
 
-## License verification and privacy
+## Privacy
 
-The animated cursor is available without activation. Typing feedback and
-ambient soundscapes require a valid Crisp license. License signatures are
-validated locally first. The plugin then sends the license code, the current
-Obsidian app/device identifier, and the plugin ID to the Crisp license service
-to register or verify the device. If the service is temporarily unreachable,
-a previously verified license receives a seven-day offline grace period.
-
-The license code is stored only in the current vault's plugin `data.json`.
+Crisp Focus makes no network requests. All settings, including scene and
+audio preferences, are stored only in the current vault's plugin `data.json`.
 Keep that file private and exclude it from shared archives.
 
 ## Development
